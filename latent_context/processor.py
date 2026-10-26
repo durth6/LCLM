@@ -39,6 +39,7 @@ class LCLMProcessor:
         self.memory_placeholder = "<|memory|>"
         self.memory_start = "<|memory_start|>"
         self.memory_end = "<|memory_end|>"
+        self.selected_memory_marker = "<|selected_memory|>"
         
         # Compile regex pattern for finding code regions
         # Using re.DOTALL to match newlines within code
@@ -170,6 +171,74 @@ class LCLMProcessor:
             "latent_counts": all_latent_counts,
             "embed_token_counts": all_embed_token_counts,
             "memory_token_ids": all_memory_token_ids,  # Embed token IDs instead of raw strings
+        }
+
+    def process_selected_memory_batch(
+        self,
+        prompts: List[str],
+        selected_latent_counts: List[int],
+        targets: Optional[List[str]] = None,
+        padding: str = "longest",
+        truncation: bool = False,
+        return_tensors: str = "pt",
+        allow_empty_memory: bool = False,
+    ) -> Dict[str, Any]:
+        """Build Decoder inputs from already selected latent embeddings.
+
+        Every prompt must contain exactly one ``<|selected_memory|>`` marker.
+        Unlike ``process_wrapped_batch`` this method receives no raw context and
+        never calls the embedding tokenizer, which enforces latent-only online
+        retrieval.
+        """
+        if len(prompts) != len(selected_latent_counts):
+            raise ValueError("selected_latent_counts must match prompts")
+        if targets is not None and len(targets) != len(prompts):
+            raise ValueError("targets must match prompts")
+
+        expanded_prompts = []
+        for prompt, count in zip(prompts, selected_latent_counts):
+            if count < 0 or (count == 0 and not allow_empty_memory):
+                raise ValueError("selected latent count must be positive unless empty memory is enabled")
+            if prompt.count(self.selected_memory_marker) != 1:
+                raise ValueError(
+                    f"prompt must contain exactly one {self.selected_memory_marker} marker"
+                )
+            replacement = self.memory_start + self.memory_placeholder * count + self.memory_end
+            expanded_prompts.append(prompt.replace(self.selected_memory_marker, replacement))
+
+        if targets is None:
+            full_sequences = expanded_prompts
+            prompt_lengths = None
+        else:
+            full_sequences = [prompt + target for prompt, target in zip(expanded_prompts, targets)]
+            prompt_lengths = [
+                len(self.decoder_tokenizer.encode(prompt, add_special_tokens=False))
+                for prompt in expanded_prompts
+            ]
+        tokenized = self.decoder_tokenizer(
+            full_sequences,
+            padding=padding,
+            truncation=truncation,
+            return_tensors=return_tensors,
+        )
+        memory_positions = [
+            self._find_all_memory_token_positions(
+                tokenized["input_ids"][i], expected_chunks_per_region=[count]
+            )
+            for i, count in enumerate(selected_latent_counts)
+        ]
+        labels = None
+        if prompt_lengths is not None:
+            labels = tokenized["input_ids"].clone()
+            for i, prompt_length in enumerate(prompt_lengths):
+                labels[i, :prompt_length] = -100
+            labels = labels.masked_fill(tokenized["attention_mask"] == 0, -100)
+        return {
+            "input_ids": tokenized["input_ids"],
+            "attention_mask": tokenized["attention_mask"],
+            "labels": labels,
+            "memory_positions": memory_positions,
+            "latent_counts": [[count] for count in selected_latent_counts],
         }
 
     def process_teacher_batch(

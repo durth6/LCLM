@@ -8,6 +8,7 @@ see ``inference.vllm_inference`` (two-stage encode/decode CLI).
 """
 
 import json
+import hashlib
 import os
 
 import torch
@@ -16,6 +17,38 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokeni
 
 from latent_context.model import LCLM
 from latent_context.processor import LCLMProcessor
+
+
+def _sha256_file(path: str) -> str:
+    """Hash a checkpoint artifact without loading it into model memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _encoder_cache_identity(encoder_dir: str) -> str:
+    """Return a strong identity for latent-cache compatibility.
+
+    Pre-Adapter latents depend on the encoder weights and its tokenizer, not on
+    decoder or Adapter weights.  Hashing the local encoder artifacts once at
+    model load prevents accidental cache reuse after Stage C encoder tuning.
+    """
+    artifact_names = [
+        "model.safetensors", "model.safetensors.index.json", "adapter_model.safetensors",
+        "adapter_config.json", "config.json", "tokenizer.json", "tokenizer_config.json",
+        "special_tokens_map.json", "vocab.json", "merges.txt", "added_tokens.json",
+    ]
+    artifacts = {}
+    for name in artifact_names:
+        artifact_path = os.path.join(encoder_dir, name)
+        if os.path.isfile(artifact_path):
+            artifacts[name] = _sha256_file(artifact_path)
+    if not artifacts:
+        raise FileNotFoundError(f"no encoder artifacts found in {encoder_dir}")
+    encoded = json.dumps(artifacts, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def load_model(
@@ -207,6 +240,7 @@ def load_model(
     model.to(device)
     model.to(torch_dtype)
     model.eval()
+    model.set_memory_cache_identity(_encoder_cache_identity(embed_dir))
     print("Model loaded successfully!")
     print(model)
 

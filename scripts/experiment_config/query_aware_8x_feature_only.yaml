@@ -1,0 +1,49 @@
+# Query-aware latent-retrieval MVP; not consumed by train/launch_train.py.
+# It is a reproducibility manifest for the standalone cache/query/eval scripts.
+experiment: query-aware-lclm-8x-feature-only
+base_checkpoint: latent-context/0.6b-4b-LCLM-8x
+base_revision: 7a124e8bd607195b58e15c18231b99a2e546f69a
+
+memory:
+  compression_ratio: 8
+  cache_stage: pre_adapter_latents
+  cache_format: safetensors
+  cache_reuse: true
+  raw_context_available_online: false
+
+selector:
+  mvp: cosine
+  learned_stage_a: bi_encoder
+  question_encoder: frozen_qwen_embedding_0.6b
+  retrieval_dim: 128
+  candidate_order: source_order_after_topk
+  k_decoder: 256
+
+selector_stage_a:
+  # Must be independently generated / held-out from RULER and LongBench test.
+  training_data: independent_synthetic_niah_or_qa_spans
+  oracle_labels: answer_span_to_pre_adapter_latent_overlap
+  loss: multi_positive_listwise_rank_plus_balanced_bce
+  retrieval_dim: 128
+  learning_rate: 3.0e-4
+  epochs: 10
+  frozen_lclm: true
+  selector_checkpoint: selector.safetensors
+
+continuity:
+  mode: feature_only
+  features: [normalized_start, normalized_end, latent_gap, run_start]
+  boundary_tokens: false
+
+evaluation:
+  benchmark: ruler_niah
+  tasks: [niah_single_1, niah_single_2, niah_single_3, niah_multikey_1,
+          niah_multikey_2, niah_multikey_3, niah_multivalue, niah_multiquery]
+  context_lengths: [4096, 8192, 16384, 32768]
+  selection_ratios: [0.125, 0.25, 0.5, 0.75, 1.0]
+  reuse_queries: [1, 4, 16]
+  seeds: [4231, 5201, 9001]
+  first_smoke:
+    context_length: 4096
+    samples_per_task: 8
+    k_decoder: 256

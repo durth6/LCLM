@@ -217,6 +217,34 @@ class Encoder(nn.Module):
                 result.append(torch.cat(by_sample[sample_idx], dim=0))
         return result
 
+    def encode_with_metadata(self, memory_token_ids: List[List[int]]):
+        """Encode contexts and return source-span metadata for every latent.
+
+        This leaves :meth:`forward` unchanged for backward compatibility.  The
+        encoder window is constrained to be a multiple of the compression ratio,
+        so ``[i*N, min((i+1)*N, T))`` is the exact pooled source span even when
+        a context is tiled into multiple windows.
+        """
+        embeddings = self.forward(memory_token_ids)
+        metadata = []
+        for token_ids, latent in zip(memory_token_ids, embeddings):
+            token_count = len(self._to_list(token_ids))
+            latent_count = latent.shape[0]
+            starts = torch.arange(latent_count, device=latent.device, dtype=torch.int32)
+            starts = starts * self.compression_ratio
+            ends = torch.minimum(
+                starts + self.compression_ratio,
+                torch.full_like(starts, token_count),
+            )
+            metadata.append({
+                "latent_start": starts,
+                "latent_end": ends,
+                "latent_index": torch.arange(latent_count, device=latent.device, dtype=torch.int32),
+                "segment_id": torch.zeros(latent_count, device=latent.device, dtype=torch.int16),
+                "window_id": (starts // self.encoder_window_size).to(torch.int32),
+            })
+        return embeddings, metadata
+
     # --- Window construction --------------------------------------------
 
     def _build_window_input(

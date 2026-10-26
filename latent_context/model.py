@@ -60,6 +60,10 @@ class LCLM(nn.Module):
         self.train_encoder = train_encoder
         self.processor = processor
         self.accelerator = accelerator
+        # Populated by ``inference.hf.load_model`` from the exact encoder and
+        # tokenizer artifact hashes.  A cache must not be reused after an
+        # encoder fine-tune merely because its architecture is unchanged.
+        self._memory_cache_identity: Optional[str] = None
         self.packed_attention_backend = packed_attention_backend
         # Note: Packed attention is enabled by trainer BEFORE LoRA, not here
 
@@ -182,6 +186,62 @@ class LCLM(nn.Module):
         chunk_embeddings_list = self.encoder(memory_token_ids)  # type: ignore[arg-type]
         projected_embeddings_list = self._project_latent_embeddings_synced(chunk_embeddings_list)
         return projected_embeddings_list
+
+    def set_memory_cache_identity(self, identity: str) -> None:
+        """Set the immutable encoder/tokenizer identity used for cache checks."""
+        if not identity:
+            raise ValueError("memory cache identity must be non-empty")
+        self._memory_cache_identity = identity
+
+    def memory_fingerprint(self) -> str:
+        """Fingerprint cache-compatible Encoder settings, not Adapter weights."""
+        from .selector import make_memory_fingerprint
+        return make_memory_fingerprint({
+            "compression_ratio": self.encoder.compression_ratio,
+            "pooling": self.encoder.pooling,
+            "encoder_window_size": self.encoder.encoder_window_size,
+            "encoder_mask_type": "causal" if self.encoder.is_causal else "bidirectional",
+            "boundary_overlap": self.encoder.boundary_overlap,
+            "encoder_identity": self._memory_cache_identity or getattr(
+                self.encoder.embed_model.config, "_name_or_path", "unversioned-encoder"
+            ),
+        })
+
+    @torch.inference_mode()
+    def encode_memory(self, memory_token_ids: List[int], source_id: Optional[str] = None):
+        """Encode one context once into a reusable pre-Adapter latent cache."""
+        from .selector import LatentMemory
+
+        embeddings, metadata = self.encoder.encode_with_metadata([memory_token_ids])
+        latent = embeddings[0]
+        span = metadata[0]
+        return LatentMemory(
+            latents=latent,
+            fingerprint=self.memory_fingerprint(),
+            source_id=source_id,
+            **span,
+        )
+
+    def project_selected_latents(self, memory, indices: torch.Tensor) -> torch.Tensor:
+        """Project source-order selected pre-Adapter latents for Decoder input.
+
+        Selecting before an attention-bearing Adapter changes its semantics: an
+        ``mlp_attn``/``attn_mlp`` Adapter would otherwise have attended to
+        latent vectors that were later discarded.  The public 8× checkpoint is
+        MLP, so that is the deliberately supported MVP contract.
+        """
+        if self.adapter.adapter_type != "mlp":
+            raise NotImplementedError(
+                "pre-Adapter latent selection currently requires adapter_type='mlp'; "
+                "define and validate an Adapter-stage retrieval policy first"
+            )
+        selected = memory.select(indices)
+        adapter_dtype = self.adapter.fc1.weight.dtype
+        latents = selected.latents.to(
+            device=self.adapter.fc1.weight.device,
+            dtype=adapter_dtype,
+        )
+        return self.adapter(latents)
 
     # if we wrap the adapter with FSDP, we need to the operations across all ranks as well. Here we just concat all embeddings and do 1 forward pass as the memory would be cheap.
     def _project_latent_embeddings_synced(

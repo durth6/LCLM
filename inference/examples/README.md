@@ -76,6 +76,32 @@ upstream NVIDIA RULER reference implementation.
 
 ## Eval datasets
 
+## Query-aware latent selection
+
+The leakage-safe query-aware evaluator keeps source text in the offline cache
+builder and gives answer-time selection only the short query plus cached
+latents.  Use `--position-policy full_layout` for sparse evaluation.  The
+optional `--coverage-rerank` flag enables fixed-K structural group coverage;
+`--dynamic-k --selection-ratio 0.25` sweeps discrete `25/50/75/100%` budgets and
+records the selected K/M and predicted coverage in `summary.json`.  Neither
+mode consumes oracle or answer-NLL labels online.
+
+For runs created before role-aware diagnostics were wired into the evaluator,
+join the offline sidecar without rerunning generation:
+
+```bash
+python -m inference.examples.enrich_role_metrics \
+    --answers-jsonl results/answers.jsonl \
+    --roles-jsonl data/oracle_latents_roles.jsonl \
+    --out-answers results/answers.with-roles.jsonl \
+    --summary-in results/summary.json \
+    --summary-out results/summary.with-roles.json
+```
+
+The join validates query/document IDs and cache fingerprints and never reads
+source text.  Role labels remain offline diagnostics; they are not an online
+selection input.
+
 All eval data lives in a single HF dataset with one config per
 benchmark:
 
@@ -90,4 +116,3 @@ print(ds[0]["extra_info"]["ground_truth"]["answers"])
 ```
 
 Schema for every row: `prompt: str`, `category: str`, `extra_info: dict`.
-

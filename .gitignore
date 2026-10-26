@@ -153,6 +153,7 @@ wandb/
 
 # Output and log files
 output.txt
+artifacts/
 
 # IDE
 .vscode/
@@ -263,3 +264,11 @@ benchmark/new_outputs/
 
 # Modal orchestration (local-only, not part of public repo)
 _modal_run/
+
+# Experiment records / notes (local-only)
+.tmp/
+improvement_round1/
+report.md
+report_results_*.md
+TASKS.md
+data.md
